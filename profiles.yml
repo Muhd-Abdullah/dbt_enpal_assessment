@@ -3,7 +3,7 @@ enpal_assessment_project:
     dev:
       dbname: postgres
       host: localhost
-      pass: admin
+      password: admin
       port: 5432
       schema: public
       threads: 1

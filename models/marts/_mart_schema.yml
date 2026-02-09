@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: rep_sales_funnel_monthly
+    description: >
+      Monthly sales funnel reporting model.
+      One row per (month, kpi_name, funnel_step) with aggregated deal counts.
+
+    tests:
+      - unique:
+          arguments:
+            column_name: "month||'|'||kpi_name||'|'||funnel_step"
+          config:
+            severity: error
+
+    columns:
+      - name: month
+        description: "Month of the metric (date truncated to first day of month)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - not_in_future:
+              arguments:
+                column_name: month
+              config:
+                severity: error
+
+      - name: kpi_name
+        description: "High-level KPI name representing the funnel metric."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: funnel_step
+        description: "Funnel step label (stage or call step)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: deals_count
+        description: >
+          Number of distinct deals reaching the funnel step in the given month.
+          Zero values are expected and intentional due to the full month × step grid.
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+          - is_positive:
+              arguments:
+                column_name: deals_count
+              config:
+                severity: error

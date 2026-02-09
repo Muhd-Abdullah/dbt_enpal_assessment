@@ -1,0 +1,316 @@
+version: 2
+
+models:
+  - name: int_activity_dedup_enriched
+    description: "Deduplicated activities enriched with activity type attributes. One row per activity_id."
+    columns:
+      - name: activity_id
+        description: "Unique identifier of the activity."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - unique:
+              config:
+                severity: error
+
+      - name: deal_id
+        description: "Related deal id (nullable in source)."
+
+      - name: assigned_to_user_id
+        description: "User assigned to the activity."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_users')
+                field: user_id
+              config:
+                # Keep as WARN: activities can be unassigned or users can be missing from extract.
+                severity: warn
+
+      - name: activity_type_code
+        description: "Activity type code/key (e.g. meeting, sc_2)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - relationships:
+              arguments:
+                to: ref('stg_activity_types')
+                field: activity_type_code
+              config:
+                # ERROR: required to classify activities into funnel steps (Sales Call 1/2).
+                severity: error
+
+      - name: activity_type_id
+        description: "Activity type id resolved from activity_type_code."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_activity_types')
+                field: activity_type_id
+              config:
+                # ERROR: lookup integrity must hold; otherwise enrichment/mapping is broken.
+                severity: error
+
+      - name: activity_type_name
+        description: "Human readable activity type name."
+
+      - name: activity_type_is_active
+        description: "Whether the activity type is active in Pipedrive."
+
+      - name: is_done
+        description: "Whether the activity is completed."
+        tests:
+          - not_null:
+              config:
+                # ERROR: used in dedup ranking and downstream logic for completed-call events.
+                severity: error
+
+      - name: due_date
+        description: "Due date / completion timestamp used for monthly attribution."
+        tests:
+          - not_null:
+              config:
+                # WARN: due_date can be NULL in Pipedrive exports; handled in model logic.
+                severity: warn
+    tests:
+      - activity_type_is_active:
+          arguments:
+            code_column: activity_type_code
+            active_column: activity_type_is_active
+            required_code: meeting
+          config:
+            severity: error
+
+      - activity_type_is_active:
+          arguments:
+            code_column: activity_type_code
+            active_column: activity_type_is_active
+            required_code: sc_2
+          config:
+            severity: error
+
+
+  - name: int_reason_lost_lookup_from_fields
+    description: "Lookup table for lost_reason options extracted from fields.field_value_options."
+    columns:
+      - name: lost_reason_id
+        description: "Lost reason id (option id)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - unique:
+              config:
+                severity: error
+
+      - name: lost_reason_label
+        description: "Lost reason label (option label)."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+
+  - name: int_stage_lookup_from_fields
+    description: "Lookup table for stage options extracted from fields.field_value_options for field_key='stage_id'."
+    columns:
+      - name: stage_id
+        description: "Stage id (option id)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - unique:
+              config:
+                severity: error
+          - relationships:
+              arguments:
+                to: ref('stg_stages')
+                field: stage_id
+              config:
+                # ERROR: stage mapping must align to canonical stage dimension used for funnel steps.
+                severity: error
+
+      - name: stage_label
+        description: "Stage label from fields options."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+
+  - name: int_deal_changes_dedup_enriched
+    description: "Deduplicated deal_changes for stage_id and lost_reason, enriched with stage and lost reason labels."
+    tests:
+      - unique:
+          arguments:
+            column_name: "deal_id||'|'||change_time||'|'||changed_field_key||'|'||new_value"
+          config:
+            severity: error
+
+    columns:
+      - name: deal_id
+        description: "Deal id."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: change_time
+        description: "Timestamp of the change."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: changed_field_key
+        description: "Changed field key (restricted to stage_id and lost_reason in this intermediate model)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - accepted_values:
+              arguments:
+                values: ['stage_id', 'lost_reason']
+              config:
+                severity: error
+
+      - name: new_value
+        description: "Raw new value as text (numeric ids only kept)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: new_value_id
+        description: "new_value cast to integer."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - is_positive:
+              arguments:
+                column_name: new_value_id
+              config:
+                severity: error
+
+      - name: stage_id
+        description: "Stage id when changed_field_key='stage_id'."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_stages')
+                field: stage_id
+              config:
+                # ERROR: stage-based funnel steps depend on valid stage_id resolution.
+                severity: error
+
+      - name: stage_label
+        description: "Stage name from stg_stages when changed_field_key='stage_id'."
+
+      - name: lost_reason_id
+        description: "Lost reason id when changed_field_key='lost_reason'."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('int_reason_lost_lookup_from_fields')
+                field: lost_reason_id
+              config:
+                # ERROR: required for correct exclusion of "Duplicate entry" deals.
+                severity: error
+
+      - name: lost_reason_label
+        description: "Lost reason label when changed_field_key='lost_reason'."
+
+
+  - name: int_funnel_events
+    description: >
+      Canonical funnel events at monthly grain: stage changes and completed call activities.
+      Excludes deals whose final lost_reason is 'Duplicate entry'.
+      One row per (deal_id, month, funnel_step).
+    tests:
+      - unique:
+          arguments:
+            column_name: "deal_id||'|'||month||'|'||funnel_step"
+          config:
+            severity: error
+
+      - requires_when:
+          arguments:
+            condition_sql: "funnel_step in ('Step 2.1: Sales Call 1','Step 3.1: Sales Call 2')"
+            required_sql: "event_source = 'activity'"
+          config:
+            severity: error
+
+      - requires_when:
+          arguments:
+            condition_sql: "funnel_step not in ('Step 2.1: Sales Call 1','Step 3.1: Sales Call 2')"
+            required_sql: "event_source = 'stage_change'"
+          config:
+            severity: error
+
+      - requires_when:
+          arguments:
+            condition_sql: "event_source = 'activity'"
+            required_sql: "event_time is not null"
+          config:
+            severity: error
+
+      - requires_when:
+          arguments:
+            condition_sql: "event_source = 'stage_change'"
+            required_sql: "event_time is not null"
+          config:
+            # ERROR: required for month attribution and correct event ordering.
+            severity: error
+
+    columns:
+      - name: deal_id
+        description: "Deal id."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: month
+        description: "Month (date-truncated to first day)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: funnel_step
+        description: "Funnel step label (stage steps and call steps)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: event_time
+        description: "Timestamp of the event (or first occurrence within month depending on logic)."
+        tests:
+          - not_null:
+              config:
+                # ERROR: monthly attribution requires event_time to exist for every event row.
+                severity: error
+
+      - name: event_source
+        description: "Source of the event (stage_change or activity)."
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - accepted_values:
+              arguments:
+                values: ['stage_change', 'activity']
+              config:
+                severity: error
+
+      - name: funnel_step_order
+        description: "Numeric ordering key for steps (e.g. 2.1, 3.1, etc.)."
+        tests:
+          - not_null:
+              config:
+                severity: warn

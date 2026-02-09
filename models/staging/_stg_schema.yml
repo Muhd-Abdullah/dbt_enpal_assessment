@@ -1,0 +1,265 @@
+version: 2
+
+models:
+  - name: stg_users
+    description: "Pipedrive users (staging)."
+    columns:
+      - name: user_id
+        description: "User ID."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: user_email
+        description: "User email."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - matches_regex:
+              arguments:
+                column_name: user_email
+                regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+                allow_null: false
+              config:
+                severity: warn
+
+      - name: user_name
+        description: "User name (not enforced as required in staging)."
+
+      - name: modified_at
+        description: "Last modified timestamp (not enforced as required in staging)."
+
+
+  - name: stg_stages
+    description: "Pipedrive stages lookup (staging)."
+    columns:
+      - name: stage_id
+        description: "Stage ID."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+          - is_positive:
+              arguments:
+                column_name: stage_id
+              config:
+                severity: warn
+
+      - name: stage_name
+        description: "Stage name."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+
+  - name: stg_activity_types
+    description: "Pipedrive activity types lookup (staging)."
+    tests:
+      # Ensure the two required call-type codes exist in the dictionary
+      - has_value_in_column:
+          arguments:
+            field_key_column: activity_type_code
+            required_key: "meeting"
+          config:
+            severity: warn
+
+      - has_value_in_column:
+          arguments:
+            field_key_column: activity_type_code
+            required_key: "sc_2"
+          config:
+            severity: warn
+      
+      - activity_type_is_active:
+          arguments:
+            code_column: activity_type_code
+            active_column: is_active
+            required_code: meeting
+          config:
+            severity: warn
+
+      - activity_type_is_active:
+          arguments:
+            code_column: activity_type_code
+            active_column: is_active
+            required_code: sc_2
+          config:
+            severity: warn
+
+    columns:
+      - name: activity_type_id
+        description: "Activity type ID."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: activity_type_code
+        description: "Activity type key/code used on activities (Activity.type / ActivityType.key_string)."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: activity_type_name
+        description: "Activity type display name (not enforced as required in staging)."
+
+      - name: is_active
+        description: "Whether the activity type is active (not enforced as required in staging)."
+
+
+  - name: stg_activity
+    description: "Pipedrive activities (staging). Activities may exist without a specific date/time."
+    tests:
+      - requires_when:
+          arguments:
+            condition_sql: "is_done = true"
+            required_sql: "due_date is not null"
+          config:
+            severity: warn
+
+    columns:
+      - name: activity_id
+        description: "Activity ID."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: activity_type_code
+        description: "Activity type code/key."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - relationships:
+              arguments:
+                to: ref('stg_activity_types')
+                field: activity_type_code
+              config:
+                severity: warn
+
+      - name: assigned_to_user_id
+        description: "Owner/assigned user id. Nullable per API, but populated in our extract."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - relationships:
+              arguments:
+                to: ref('stg_users')
+                field: user_id
+              config:
+                severity: warn
+
+      - name: deal_id
+        description: "Linked deal id. Nullable per API, but populated in our extract."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: is_done
+        description: "Completion flag (nullable per API/extract)."
+
+      - name: due_date
+        description: "Nullable: activities can be created without a specific date/time (no not_null test)."
+
+
+  - name: stg_deal_changes
+    description: "Deal change log (staging). Event-style table."
+    tests:
+      - requires_when:
+          arguments:
+            condition_sql: "changed_field_key in ('stage_id','lost_reason') and new_value is not null"
+            required_sql: "new_value ~ '^[0-9]+$'"
+          config:
+            severity: warn
+
+    columns:
+      - name: deal_id
+        description: "Deal ID (not unique)."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: change_time
+        description: "Timestamp of the change."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: changed_field_key
+        description: "Which field changed."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: new_value
+        description: "New value (nullable; fields can be cleared/unset)."
+
+
+  - name: stg_fields
+    description: "Custom fields metadata (staging)."
+    tests:
+      - has_value_in_column:
+          arguments:
+            field_key_column: field_key
+            required_key: "stage_id"
+          config:
+            severity: warn
+
+      - has_value_in_column:
+          arguments:
+            field_key_column: field_key
+            required_key: "lost_reason"
+          config:
+            severity: warn
+
+    columns:
+      - name: field_id
+        description: "Field ID."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: field_key
+        description: "Field key/code."
+        tests:
+          - not_null:
+              config:
+                severity: warn
+          - unique:
+              config:
+                severity: warn
+
+      - name: field_name
+        description: "Field name (not enforced as required in staging)."
+
+      - name: field_value_options
+        description: "Optional values/options for enumerated fields; may be null."
