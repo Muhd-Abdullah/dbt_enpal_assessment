@@ -389,5 +389,3 @@ This project is designed to be:
 - **Fail-fast** – critical issues raise errors early  
 - **Extensible** – new steps or activity types can be added cleanly  
 - **Production-ready** – strict grain, contracts, and invariants  
-
-All assumptions are documented and enforced close to where they matter.
